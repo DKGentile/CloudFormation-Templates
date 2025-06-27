@@ -1,0 +1,123 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Stack for file organization using S3, Lambda, and Bedrock with inline Lambda code",
+  "Parameters": {
+    "BucketName": {
+      "Type": "String",
+      "Description": "Name of the S3 bucket for file uploads",
+      "Default": "s3organizerstack4-s3bucket-aqfstiszzxxv"
+    },
+    "BedrockModelId": {
+      "Type": "String",
+      "Description": "ID of the Bedrock model (e.g., anthropic.claude-v2)",
+      "Default": "anthropic.claude-v2"
+    }
+  },
+  "Resources": {
+    "S3Bucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": { "Ref": "BucketName" },
+        "NotificationConfiguration": {
+          "LambdaConfigurations": [
+            {
+              "Event": "s3:ObjectCreated:*",
+              "Function": { "Fn::GetAtt": ["LambdaFunction", "Arn"] }
+            }
+          ]
+        }
+      }
+    },
+    "LambdaFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Handler": "index.handler",
+        "Role": { "Fn::GetAtt": ["LambdaExecutionRole", "Arn"] },
+        "Runtime": "python3.9",
+        "Code": {
+          "ZipFile": "import json\nimport boto3\nimport re\n\ns3_client = boto3.client('s3')\nbedrock_client = boto3.client('bedrock-runtime')\nbucket_name = \"s3organizerstack4-s3bucket-aqfstiszzxxv\"\nmodel_id = \"anthropic.claude-3-5-sonnet-20240620-v1:0\"\n\ndef handler(event, context):\n    print(f\"Event received: {json.dumps(event)}\")\n    try:\n        # List all objects in the S3 bucket\n        try:\n            response = s3_client.list_objects_v2(Bucket=bucket_name)\n            files = [obj['Key'] for obj in response.get('Contents', [])]\n            print(f\"Files in bucket: {files}\")\n        except Exception as e:\n            print(f\"Error listing bucket objects: {str(e)}\")\n            return {'statusCode': 500, 'body': json.dumps(f'S3 list error: {str(e)}')}\n        \n        if not files:\n            print(\"No files found in bucket\")\n            return {'statusCode': 200, 'body': json.dumps('No files to organize')}\n        \n        # Prepare prompt for Bedrock\n        prompt = f\"\"\"Given the following list of files in an S3 bucket: {json.dumps(files, indent=2)} Suggest an optimal directory structure with new paths for each file in JSON format, ensuring files are moved to categorized folders (e.g., text files in 'documents/text/', images in 'images/', CSVs in 'data/'). Return the response in JSON wrapped in triple backticks (```json\\n...\\n```). Example: ```json {{\"test-file.txt\": \"documents/text/test-file.txt\", \"photo.jpg\": \"images/photo.jpg\", \"data.csv\": \"data/data.csv\"}} ```\"\"\"\n        print(f\"Bedrock prompt: {prompt}\")\n        \n        # Call Bedrock model\n        try:\n            bedrock_response = bedrock_client.converse(\n                modelId=model_id,\n                messages=[{\n                    \"role\": \"user\",\n                    \"content\": [{\"text\": prompt}]\n                }]\n            )\n            print(f\"Bedrock response: {bedrock_response}\")\n        except Exception as e:\n            print(f\"Bedrock invocation error: {str(e)}\")\n            return {'statusCode': 500, 'body': json.dumps(f'Bedrock error: {str(e)}')}\n        \n        # Parse Bedrock response\n        try:\n            completion = bedrock_response['output']['message']['content'][0]['text']\n            print(f\"Bedrock response body: {completion}\")\n            # Extract JSON between ```json and ```\n            json_match = re.search(r'```json\\n(.*?)\\n```', completion, re.DOTALL)\n            if not json_match:\n                print(\"No valid JSON found in Bedrock response\")\n                return {'statusCode': 500, 'body': json.dumps('No valid JSON in Bedrock response')}\n            new_structure = json.loads(json_match.group(1))\n            print(f\"Parsed new structure: {new_structure}\")\n        except (KeyError, IndexError) as e:\n            print(f\"Error accessing Bedrock response: {e}\")\n            return {'statusCode': 500, 'body': json.dumps(f'Error accessing Bedrock response: {e}')}\n        except Exception as e:\n            print(f\"Error parsing Bedrock response: {str(e)}\")\n            return {'statusCode': 500, 'body': json.dumps(f'Error parsing Bedrock response: {str(e)}')}\n        \n        # Reorganize files\n        for old_key, new_key in new_structure.items():\n            if old_key != new_key:\n                print(f\"Moving {old_key} to {new_key}\")\n                try:\n                    s3_client.copy_object(\n                        Bucket=bucket_name,\n                        CopySource={'Bucket': bucket_name, 'Key': old_key},\n                        Key=new_key\n                    )\n                    s3_client.delete_object(Bucket=bucket_name, Key=old_key)\n                    print(f\"Moved {old_key} to {new_key}\")\n                except Exception as e:\n                    print(f\"Error moving {old_key} to {new_key}: {str(e)}\")\n                    return {'statusCode': 500, 'body': json.dumps(f'S3 error: {str(e)}')}\n            else:\n                print(f\"No move needed for {old_key}: same as new path\")\n        \n        return {\n            'statusCode': 200,\n            'body': json.dumps('File organization completed')\n        }\n    except Exception as e:\n        print(f\"General error: {str(e)}\")\n        return {\n            'statusCode': 500,\n            'body': json.dumps(f'General error: {str(e)}')\n        }"
+        },
+        "Timeout": 300,
+        "Environment": {
+          "Variables": {
+            "BEDROCK_MODEL_ID": { "Ref": "BedrockModelId" },
+            "BUCKET_NAME": { "Ref": "BucketName" }
+          }
+        }
+      }
+    },
+    "LambdaExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "LambdaS3BedrockPolicy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:ListBucket",
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:DeleteObject"
+                  ],
+                  "Resource": [
+                    "arn:aws:s3:::s3organizerstack4-s3bucket-aqfstiszzxxv",
+                    "arn:aws:s3:::s3organizerstack4-s3bucket-aqfstiszzxxv/*"
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["bedrock:InvokeModel"],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "LambdaInvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": { "Fn::GetAtt": ["LambdaFunction", "Arn"] },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "s3.amazonaws.com",
+        "SourceArn": "arn:aws:s3:::s3organizerstack4-s3bucket-aqfstiszzxxv"
+      }
+    }
+  },
+  "Outputs": {
+    "BucketName": {
+      "Description": "Name of the S3 bucket",
+      "Value": { "Ref": "BucketName" }
+    },
+    "LambdaFunctionArn": {
+      "Description": "ARN of the Lambda function",
+      "Value": { "Fn::GetAtt": ["LambdaFunction", "Arn"] }
+    }
+  }
+}
